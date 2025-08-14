@@ -1,16 +1,18 @@
 import json
 import time
+import threading
+import requests
 from flask import Flask, render_template_string
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import re
 
 app = Flask(__name__)
 
 PRODUCTS_FILE = "products.json"
+CONFIG_FILE = "config.json"
 
 # ------------------ Load and Save ------------------
 def load_products():
@@ -21,57 +23,64 @@ def save_products(products):
     with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
         json.dump(products, f, indent=4)
 
+def load_config():
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+# ------------------ Telegram Notification ------------------
+def send_telegram_message(message):
+    config = load_config()
+    token = config.get("telegram_token")
+    chat_id = config.get("telegram_chat_id")
+    if not token or not chat_id:
+        print("⚠ Telegram config missing in config.json")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": message}
+        requests.post(url, data=payload)
+        print(f"📩 Telegram sent: {message}")
+    except Exception as e:
+        print("Telegram send error:", e)
+
 # ------------------ Selenium Setup ------------------
 def init_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")  # Headless mode
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    return webdriver.Chrome(options=chrome_options)
+    driver = webdriver.Chrome(options=chrome_options)
+    return driver
 
 # ------------------ Price Fetch ------------------
 def fetch_price_samsung_in(url):
     driver = init_driver()
+    price_text = None
     try:
         driver.get(url)
 
-        # Wait up to 15s for price to appear — try exact span.s-rdo-price first
-        try:
-            price_element = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "span.s-rdo-price")
-                )
+        price_element = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, ".s-rdo-price, .product-details__price, .pd-price, .price")
             )
-        except:
-            # Fallback to older selectors if s-rdo-price not found
-            price_element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".product-details__price, .pd-price, .price")
-                )
-            )
+        )
 
         price_text = price_element.text.strip()
+        price_text = price_text.replace("₹", "").strip()
 
-        # If EMI format is present: "₹10888.78/mo. or ₹97999.00"
-        if "or" in price_text:
-            price_text = price_text.split("or")[-1].strip()
-
-        # Clean ₹ and commas
-        price_text = price_text.replace("₹", "").replace(",", "").strip()
-
-        # Extract number
-        if price_text.isdigit():
-            return int(price_text)
-        else:
-            numbers = re.findall(r"\d+", price_text)
-            if numbers:
-                return int("".join(numbers))
+        import re
+        numbers = re.findall(r"\d[\d,]*", price_text)
+        if numbers:
+            clean_price = numbers[-1]  # usually last number is actual price
+            clean_price = clean_price.replace(",", "")
+            return int(clean_price)
 
     except Exception as e:
         print("Price fetch error:", e)
-        return None
     finally:
         driver.quit()
+
+    return None
 
 # ------------------ Tracker Logic ------------------
 def check_prices():
@@ -80,11 +89,13 @@ def check_prices():
         if not product.get("enabled", True):
             continue
 
-        print(f"Checking price for {product['name']}...")
+        print(f"🔍 Checking price for {product['name']}...")
         current_price = fetch_price_samsung_in(product["url"])
         if current_price:
             product["current_price"] = current_price
             if current_price <= product["target_price"]:
+                if product.get("status") != "✅ Target reached!":
+                    send_telegram_message(f"✅ {product['name']} is now ₹{current_price}!\n{product['url']}")
                 product["status"] = "✅ Target reached!"
             else:
                 product["status"] = "💲 Above target"
@@ -93,6 +104,12 @@ def check_prices():
             product["status"] = "❌ Price not found"
 
     save_products(products)
+
+# ------------------ Background Loop ------------------
+def auto_check_loop(interval=60):
+    while True:
+        check_prices()
+        time.sleep(interval)
 
 # ------------------ Flask Web UI ------------------
 HTML_TEMPLATE = """
@@ -132,9 +149,11 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def index():
-    check_prices()
     products = load_products()
     return render_template_string(HTML_TEMPLATE, products=products)
 
+# ------------------ Main ------------------
 if __name__ == "__main__":
+    # Start background checker every 60 seconds
+    threading.Thread(target=auto_check_loop, args=(60,), daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
