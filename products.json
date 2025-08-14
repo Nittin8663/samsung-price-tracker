@@ -11,10 +11,5 @@
         "target_price": 155000,
         "enabled": false
     },
-    {
-        "name": "Galaxy Watch7 44mm LTE",
-        "url": "https://www.samsung.com/in/watches/galaxy-watch/galaxy-watch7-lte-44mm-green-sm-l715fzdains/",
-        "target_price": 20000,
-        "enabled": true
-    }
+  
 ]
