@@ -6,6 +6,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import re
 
 app = Flask(__name__)
 
@@ -26,41 +27,51 @@ def init_driver():
     chrome_options.add_argument("--headless=new")  # Headless mode
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(options=chrome_options)
-    return driver
+    return webdriver.Chrome(options=chrome_options)
 
 # ------------------ Price Fetch ------------------
 def fetch_price_samsung_in(url):
     driver = init_driver()
-    price_text = None
     try:
         driver.get(url)
 
-        # Wait up to 15s for price to appear
-        price_element = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, ".product-details__price, .pd-price, .price")  # Flexible selector
+        # Wait up to 15s for price to appear — try exact span.s-rdo-price first
+        try:
+            price_element = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "span.s-rdo-price")
+                )
             )
-        )
+        except:
+            # Fallback to older selectors if s-rdo-price not found
+            price_element = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, ".product-details__price, .pd-price, .price")
+                )
+            )
 
         price_text = price_element.text.strip()
+
+        # If EMI format is present: "₹10888.78/mo. or ₹97999.00"
+        if "or" in price_text:
+            price_text = price_text.split("or")[-1].strip()
+
+        # Clean ₹ and commas
         price_text = price_text.replace("₹", "").replace(",", "").strip()
 
+        # Extract number
         if price_text.isdigit():
             return int(price_text)
         else:
-            # Extract first number found in string
-            import re
             numbers = re.findall(r"\d+", price_text)
             if numbers:
                 return int("".join(numbers))
 
     except Exception as e:
         print("Price fetch error:", e)
+        return None
     finally:
         driver.quit()
-
-    return None
 
 # ------------------ Tracker Logic ------------------
 def check_prices():
