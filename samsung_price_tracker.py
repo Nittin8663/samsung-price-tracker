@@ -1,13 +1,13 @@
 import json
+import re
 import time
-import threading
-import requests
 from flask import Flask, render_template_string
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import requests
 
 app = Flask(__name__)
 
@@ -30,18 +30,14 @@ def load_config():
 # ------------------ Telegram Notification ------------------
 def send_telegram_message(message):
     config = load_config()
-    token = config.get("telegram_token")
-    chat_id = config.get("telegram_chat_id")
-    if not token or not chat_id:
-        print("⚠ Telegram config missing in config.json")
-        return
+    bot_token = config["telegram_bot_token"]
+    chat_id = config["telegram_chat_id"]
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
     try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message}
-        requests.post(url, data=payload)
-        print(f"📩 Telegram sent: {message}")
+        requests.post(url, data=payload, timeout=10)
     except Exception as e:
-        print("Telegram send error:", e)
+        print(f"Telegram send error: {e}")
 
 # ------------------ Selenium Setup ------------------
 def init_driver():
@@ -55,10 +51,11 @@ def init_driver():
 # ------------------ Price Fetch ------------------
 def fetch_price_samsung_in(url):
     driver = init_driver()
-    price_text = None
+    price_value = None
     try:
         driver.get(url)
 
+        # Wait up to 15s for price to appear
         price_element = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located(
                 (By.CSS_SELECTOR, ".s-rdo-price, .product-details__price, .pd-price, .price")
@@ -66,21 +63,20 @@ def fetch_price_samsung_in(url):
         )
 
         price_text = price_element.text.strip()
-        price_text = price_text.replace("₹", "").strip()
+        print(f"Raw price text: {price_text}")
 
-        import re
+        # Extract the last numeric value in the string
         numbers = re.findall(r"\d[\d,]*", price_text)
         if numbers:
-            clean_price = numbers[-1]  # usually last number is actual price
-            clean_price = clean_price.replace(",", "")
-            return int(clean_price)
+            price_str = numbers[-1].replace(",", "")
+            price_value = int(price_str)
 
     except Exception as e:
         print("Price fetch error:", e)
     finally:
         driver.quit()
 
-    return None
+    return price_value
 
 # ------------------ Tracker Logic ------------------
 def check_prices():
@@ -89,13 +85,16 @@ def check_prices():
         if not product.get("enabled", True):
             continue
 
-        print(f"🔍 Checking price for {product['name']}...")
+        print(f"Checking price for {product['name']}...")
         current_price = fetch_price_samsung_in(product["url"])
+
         if current_price:
             product["current_price"] = current_price
             if current_price <= product["target_price"]:
                 if product.get("status") != "✅ Target reached!":
-                    send_telegram_message(f"✅ {product['name']} is now ₹{current_price}!\n{product['url']}")
+                    send_telegram_message(
+                        f"✅ {product['name']} is now ₹{current_price} (target ₹{product['target_price']})\n{product['url']}"
+                    )
                 product["status"] = "✅ Target reached!"
             else:
                 product["status"] = "💲 Above target"
@@ -104,12 +103,6 @@ def check_prices():
             product["status"] = "❌ Price not found"
 
     save_products(products)
-
-# ------------------ Background Loop ------------------
-def auto_check_loop(interval=60):
-    while True:
-        check_prices()
-        time.sleep(interval)
 
 # ------------------ Flask Web UI ------------------
 HTML_TEMPLATE = """
@@ -120,7 +113,7 @@ HTML_TEMPLATE = """
     <style>
         body { font-family: Arial; margin: 40px; }
         table { border-collapse: collapse; width: 80%; }
-        th, td { border: 1px solid #ddd; padding: 8px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
         th { background: #333; color: #fff; }
         tr:nth-child(even) { background: #f2f2f2; }
     </style>
@@ -149,11 +142,9 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def index():
+    check_prices()
     products = load_products()
     return render_template_string(HTML_TEMPLATE, products=products)
 
-# ------------------ Main ------------------
 if __name__ == "__main__":
-    # Start background checker every 60 seconds
-    threading.Thread(target=auto_check_loop, args=(60,), daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
