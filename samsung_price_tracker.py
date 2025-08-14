@@ -1,186 +1,129 @@
-import time
 import json
-import threading
-import requests
-from flask import Flask, render_template_string, request, redirect
+import time
+from flask import Flask, render_template_string
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# Load configs
-with open("config.json") as f:
-    config = json.load(f)
-
-TELEGRAM_BOT_TOKEN = config["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = config["TELEGRAM_CHAT_ID"]
-CHECK_INTERVAL = config["CHECK_INTERVAL"]
-
 app = Flask(__name__)
 
-# HTML Template for main page
-HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>Samsung Shop Price Alert</title>
-<style>
-body { font-family: Arial; margin: 40px; }
-table { border-collapse: collapse; width: 100%; }
-th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-th { background-color: #f2f2f2; }
-input[type=text], input[type=number] { width: 100%; padding: 5px; }
-button { padding: 5px 10px; }
-</style>
-</head>
-<body>
-<h2>Samsung Shop Price Alert Bot</h2>
-<table>
-<tr><th>Name</th><th>URL</th><th>Target Price</th><th>Enabled</th><th>Actions</th></tr>
-{% for p in products %}
-<tr>
-<td>{{ p.name }}</td>
-<td><a href="{{ p.url }}" target="_blank">Link</a></td>
-<td>{{ p.target_price }}</td>
-<td>{{ '✅' if p.enabled else '❌' }}</td>
-<td>
-<a href="/toggle/{{ loop.index0 }}">Toggle</a> |
-<a href="/delete/{{ loop.index0 }}">Delete</a> |
-<a href="/edit/{{ loop.index0 }}">Edit Price</a>
-</td>
-</tr>
-{% endfor %}
-</table>
-<h3>Add New Product</h3>
-<form method="post" action="/add">
-<input type="text" name="name" placeholder="Product Name" required>
-<input type="text" name="url" placeholder="Samsung Shop URL" required>
-<input type="number" name="target_price" placeholder="Target Price" required>
-<button type="submit">Add</button>
-</form>
-</body>
-</html>
-"""
+PRODUCTS_FILE = "products.json"
 
-# HTML Template for editing target price
-EDIT_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>Edit Target Price</title>
-<style>
-body { font-family: Arial; margin: 40px; }
-input[type=number] { width: 100%; padding: 5px; }
-button { padding: 5px 10px; }
-</style>
-</head>
-<body>
-<h2>Edit Target Price for {{ product.name }}</h2>
-<form method="post" action="/edit/{{ index }}">
-<input type="number" name="target_price" value="{{ product.target_price }}" required>
-<button type="submit">Save</button>
-</form>
-</body>
-</html>
-"""
-
+# ------------------ Load and Save ------------------
 def load_products():
-    with open("products.json") as f:
+    with open(PRODUCTS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def save_products(products):
-    with open("products.json", "w") as f:
+    with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
         json.dump(products, f, indent=4)
 
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    requests.post(url, data=data)
-
-def get_price(url):
+# ------------------ Selenium Setup ------------------
+def init_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless=new")  # Headless mode
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     driver = webdriver.Chrome(options=chrome_options)
+    return driver
 
-    driver.get(url)
+# ------------------ Price Fetch ------------------
+def fetch_price_samsung_in(url):
+    driver = init_driver()
+    price_text = None
     try:
-        # Match Samsung India's possible price selectors
-        price_element = WebDriverWait(driver, 20).until(
-            EC.visibility_of_element_located((
-                By.CSS_SELECTOR,
-                "span.pd-price, span.price, span.product-card-price, span.pdp-price"
-            ))
+        driver.get(url)
+
+        # Wait up to 15s for price to appear
+        price_element = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, ".product-details__price, .pd-price, .price")  # Flexible selector
+            )
         )
+
         price_text = price_element.text.strip()
+        price_text = price_text.replace("₹", "").replace(",", "").strip()
 
-        # Remove currency symbols, commas, and decimals
-        price_digits = ''.join(filter(str.isdigit, price_text))
-        driver.quit()
+        if price_text.isdigit():
+            return int(price_text)
+        else:
+            # Extract first number found in string
+            import re
+            numbers = re.findall(r"\d+", price_text)
+            if numbers:
+                return int("".join(numbers))
 
-        return int(price_digits) if price_digits else None
     except Exception as e:
-        print(f"Price fetch error: {e}")
+        print("Price fetch error:", e)
+    finally:
         driver.quit()
-        return None
 
-def price_checker():
-    while True:
-        products = load_products()
-        for product in products:
-            if not product["enabled"]:
-                continue
-            print(f"Checking price for: {product['url']}")
-            price = get_price(product["url"])
-            if price:
-                print(f"Current price: ₹{price}")
-                if price <= product["target_price"]:
-                    send_telegram_message(f"📢 Price Alert! {product['name']} is ₹{price}\n{product['url']}")
-        time.sleep(CHECK_INTERVAL)
+    return None
+
+# ------------------ Tracker Logic ------------------
+def check_prices():
+    products = load_products()
+    for product in products:
+        if not product.get("enabled", True):
+            continue
+
+        print(f"Checking price for {product['name']}...")
+        current_price = fetch_price_samsung_in(product["url"])
+        if current_price:
+            product["current_price"] = current_price
+            if current_price <= product["target_price"]:
+                product["status"] = "✅ Target reached!"
+            else:
+                product["status"] = "💲 Above target"
+        else:
+            product["current_price"] = None
+            product["status"] = "❌ Price not found"
+
+    save_products(products)
+
+# ------------------ Flask Web UI ------------------
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Samsung Price Tracker</title>
+    <style>
+        body { font-family: Arial; margin: 40px; }
+        table { border-collapse: collapse; width: 80%; }
+        th, td { border: 1px solid #ddd; padding: 8px; }
+        th { background: #333; color: #fff; }
+        tr:nth-child(even) { background: #f2f2f2; }
+    </style>
+</head>
+<body>
+<h1>Samsung Price Tracker</h1>
+<table>
+<tr>
+    <th>Product</th>
+    <th>Target Price</th>
+    <th>Current Price</th>
+    <th>Status</th>
+</tr>
+{% for p in products %}
+<tr>
+    <td><a href="{{ p.url }}" target="_blank">{{ p.name }}</a></td>
+    <td>₹{{ p.target_price }}</td>
+    <td>{% if p.current_price %}₹{{ p.current_price }}{% else %}-{% endif %}</td>
+    <td>{{ p.status }}</td>
+</tr>
+{% endfor %}
+</table>
+</body>
+</html>
+"""
 
 @app.route("/")
 def index():
+    check_prices()
     products = load_products()
-    return render_template_string(HTML, products=products)
-
-@app.route("/add", methods=["POST"])
-def add():
-    products = load_products()
-    products.append({
-        "name": request.form["name"],
-        "url": request.form["url"],
-        "target_price": int(request.form["target_price"]),
-        "enabled": True
-    })
-    save_products(products)
-    return redirect("/")
-
-@app.route("/delete/<int:index>")
-def delete(index):
-    products = load_products()
-    products.pop(index)
-    save_products(products)
-    return redirect("/")
-
-@app.route("/toggle/<int:index>")
-def toggle(index):
-    products = load_products()
-    products[index]["enabled"] = not products[index]["enabled"]
-    save_products(products)
-    return redirect("/")
-
-@app.route("/edit/<int:index>", methods=["GET", "POST"])
-def edit(index):
-    products = load_products()
-    if request.method == "POST":
-        products[index]["target_price"] = int(request.form["target_price"])
-        save_products(products)
-        return redirect("/")
-    else:
-        return render_template_string(EDIT_HTML, product=products[index], index=index)
+    return render_template_string(HTML_TEMPLATE, products=products)
 
 if __name__ == "__main__":
-    threading.Thread(target=price_checker, daemon=True).start()
     app.run(host="0.0.0.0", port=5000)
