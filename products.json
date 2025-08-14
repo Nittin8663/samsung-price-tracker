@@ -1,0 +1,20 @@
+[
+    {
+        "name": "Galaxy S24 Ultra 256GB",
+        "url": "https://www.samsung.com/in/smartphones/galaxy-s24-ultra/buy/",
+        "target_price": 115000,
+        "enabled": true
+    },
+    {
+        "name": "Galaxy Z Fold6 512GB",
+        "url": "https://www.samsung.com/in/smartphones/galaxy-z-fold6/buy/",
+        "target_price": 155000,
+        "enabled": false
+    },
+    {
+        "name": "Galaxy Watch7 44mm LTE",
+        "url": "https://www.samsung.com/in/watches/galaxy-watch/galaxy-watch7-lte-44mm-green-sm-l715fzdains/",
+        "target_price": 20000,
+        "enabled": true
+    }
+]
