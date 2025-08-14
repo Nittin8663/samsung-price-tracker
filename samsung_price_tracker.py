@@ -107,14 +107,20 @@ def get_price(url):
 
     driver.get(url)
     try:
-        # Wait for Samsung Shop price element to appear
-        price_element = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "span.product-card-price, span.pdp-price"))
+        # Match Samsung India's possible price selectors
+        price_element = WebDriverWait(driver, 20).until(
+            EC.visibility_of_element_located((
+                By.CSS_SELECTOR,
+                "span.pd-price, span.price, span.product-card-price, span.pdp-price"
+            ))
         )
         price_text = price_element.text.strip()
-        price_text = price_text.replace("₹", "").replace(",", "").split(".")[0]
+
+        # Remove currency symbols, commas, and decimals
+        price_digits = ''.join(filter(str.isdigit, price_text))
         driver.quit()
-        return int(price_text)
+
+        return int(price_digits) if price_digits else None
     except Exception as e:
         print(f"Price fetch error: {e}")
         driver.quit()
