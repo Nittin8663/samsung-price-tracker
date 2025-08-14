@@ -1,18 +1,39 @@
 import json
-import re
 import time
+import re
+import requests
 from flask import Flask, render_template_string
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import requests
 
 app = Flask(__name__)
 
 PRODUCTS_FILE = "products.json"
 CONFIG_FILE = "config.json"
+
+# ------------------ Load Config ------------------
+def load_config():
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def send_telegram_message(message):
+    config = load_config()
+    token = config.get("telegram_bot_token")
+    chat_id = config.get("telegram_chat_id")
+
+    if not token or not chat_id:
+        print("Telegram config missing")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    data = {"chat_id": chat_id, "text": message}
+    try:
+        requests.post(url, data=data)
+    except Exception as e:
+        print("Telegram error:", e)
 
 # ------------------ Load and Save ------------------
 def load_products():
@@ -23,26 +44,10 @@ def save_products(products):
     with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
         json.dump(products, f, indent=4)
 
-def load_config():
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-# ------------------ Telegram Notification ------------------
-def send_telegram_message(message):
-    config = load_config()
-    bot_token = config["telegram_bot_token"]
-    chat_id = config["telegram_chat_id"]
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message}
-    try:
-        requests.post(url, data=payload, timeout=10)
-    except Exception as e:
-        print(f"Telegram send error: {e}")
-
 # ------------------ Selenium Setup ------------------
 def init_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless=new")  # Headless mode
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     driver = webdriver.Chrome(options=chrome_options)
@@ -55,21 +60,20 @@ def fetch_price_samsung_in(url):
     try:
         driver.get(url)
 
-        # Wait up to 15s for price to appear
-        price_element = WebDriverWait(driver, 15).until(
+        # Wait for the correct element
+        price_element = WebDriverWait(driver, 30).until(
             EC.presence_of_element_located(
-                (By.CSS_SELECTOR, ".s-rdo-price, .product-details__price, .pd-price, .price")
+                (By.CSS_SELECTOR, ".s-rdo-price")  # Samsung India price class
             )
         )
 
         price_text = price_element.text.strip()
-        print(f"Raw price text: {price_text}")
-
-        # Extract the last numeric value in the string
-        numbers = re.findall(r"\d[\d,]*", price_text)
-        if numbers:
-            price_str = numbers[-1].replace(",", "")
-            price_value = int(price_str)
+        # Extract only the last ₹xxxxx.xx part
+        match = re.search(r"₹[\d,]+(?:\.\d{1,2})?", price_text)
+        if match:
+            price_clean = match.group().replace("₹", "").replace(",", "")
+            # Convert to integer (remove .00 if exists)
+            price_value = int(float(price_clean))
 
     except Exception as e:
         print("Price fetch error:", e)
@@ -87,15 +91,11 @@ def check_prices():
 
         print(f"Checking price for {product['name']}...")
         current_price = fetch_price_samsung_in(product["url"])
-
         if current_price:
             product["current_price"] = current_price
             if current_price <= product["target_price"]:
-                if product.get("status") != "✅ Target reached!":
-                    send_telegram_message(
-                        f"✅ {product['name']} is now ₹{current_price} (target ₹{product['target_price']})\n{product['url']}"
-                    )
                 product["status"] = "✅ Target reached!"
+                send_telegram_message(f"🎯 {product['name']} now at ₹{current_price} (Target ₹{product['target_price']})\n{product['url']}")
             else:
                 product["status"] = "💲 Above target"
         else:
@@ -113,7 +113,7 @@ HTML_TEMPLATE = """
     <style>
         body { font-family: Arial; margin: 40px; }
         table { border-collapse: collapse; width: 80%; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+        th, td { border: 1px solid #ddd; padding: 8px; }
         th { background: #333; color: #fff; }
         tr:nth-child(even) { background: #f2f2f2; }
     </style>
@@ -147,4 +147,6 @@ def index():
     return render_template_string(HTML_TEMPLATE, products=products)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    while True:
+        check_prices()
+        time.sleep(3600)  # check every 1 hour
